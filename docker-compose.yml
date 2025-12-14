@@ -1,0 +1,127 @@
+networks:
+  av_framework_net:
+    driver: bridge
+
+volumes:
+  db-data:
+  ollama-data:
+
+services:
+  # Base de datos
+  db:
+    image: postgres:14
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: edu_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - av_framework_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d edu_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Ollama para LLMs
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - av_framework_net
+    entrypoint: ["/bin/sh"]
+    command:
+      - -c
+      - |
+        echo "Iniciando Ollama server..."
+        ollama serve &
+        sleep 10
+        if [ ! -f /root/.ollama/models/manifests/registry.ollama.ai/library/tinyllama/latest ]; then
+          echo "Descargando tinyllama..."
+          ollama pull tinyllama
+        fi
+        echo "Ollama listo"
+        wait
+
+  # Asistente basado en reglas
+  rule_based:
+    build:
+      context: ./assistants/rule-based
+      dockerfile: Dockerfile
+    container_name: rule-based
+    restart: always
+    ports:
+      - "5001:5001"
+    networks:
+      - av_framework_net
+    depends_on:
+      - db
+
+  # Asistente NLU (Transformers multilingüe)
+  deeppavlov_nlu:
+    build:
+      context: ./assistants/deeppavlov-nlu
+      dockerfile: Dockerfile
+    container_name: deeppavlov-nlu
+    restart: always
+    ports:
+      - "5002:5002"
+    networks:
+      - av_framework_net
+    depends_on:
+      - db
+
+  # Orquestador principal
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    container_name: orchestrator
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      DB_HOST: db
+      DB_USER: user
+      DB_PASSWORD: password
+      DB_NAME: edu_db
+      RULE_BASED_URL: http://rule_based:5001
+      DEEPPAVLOV_URL: http://deeppavlov_nlu:5002
+      OLLAMA_URL: http://ollama:11434
+    networks:
+      - av_framework_net
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+      rule_based:
+        condition: service_started
+      deeppavlov_nlu:
+        condition: service_started
+
+  # Interfaz de usuario
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    container_name: ui
+    restart: always
+    ports:
+      - "8501:8501"
+    environment:
+      ORCHESTRATOR_URL: http://orchestrator:8000
+    networks:
+      - av_framework_net
+    depends_on:
+      - orchestrator
