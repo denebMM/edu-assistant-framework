@@ -36,6 +36,26 @@ Crear un ecosistema extensible para educación
 │Asist. │ │ Asistente│ │  Asistente  │ │  Asistente  │ │Asist.  │
 │OpenAI │ │Dialogflow│ │   Local     │ │   Alpha     │ │  ...  │
 └───────┘ └──────────┘ └─────────────┘ └─────────────┘ └────────┘
+
+### 2.1 Diagrama de Secuencia - Flujo Normal
+
+```mermaid
+sequenceDiagram
+    participant C as Cliente
+    participant O as Orquestador
+    participant W as Wrapper
+    participant A as Asistente
+
+    C->>O: Enviar consulta + contexto
+    O->>O: Analizar consulta
+    O->>O: Seleccionar asistente(s)
+    O->>W: Delegar consulta
+    W->>A: Traducir y enviar
+    A->>W: Respuesta nativa
+    W->>O: Traducir a formato común
+    O->>O: Procesar/Combinar respuestas
+    O->>C: Respuesta unificada
+    
 2. Diagramas del Sistema
 Diagrama de Secuencia - Flujo Normal
 Diagrama de Componentes
