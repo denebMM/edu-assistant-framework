@@ -9,32 +9,33 @@ Orquestar consultas entre diferentes asistentes
 
 Crear un ecosistema extensible para educación
 
-Arquitectura Actual
-text
+### 1.1 Arquitectura Actual
+
+```text
 ┌─────────────────────────────────────────────────────────────┐
-│                    APLICACIÓN CLIENTE                        │
-│  (Frontend, App móvil, Sistema educativo, etc.)             │
+│           APLICACIÓN CLIENTE                                │
+│ (Frontend, App móvil, Sistema educativo, etc.)              │
 └──────────────────────────────┬──────────────────────────────┘
-                                │
+                               │
 ┌──────────────────────────────▼──────────────────────────────┐
-│                    ORQUESTADOR CENTRAL                        │
-│  • Recibe consultas                                          │
-│  • Determina el mejor asistente                              │
-│  • Combina múltiples respuestas                              │
-│  • Maneja contexto de conversación                           │
+│           ORQUESTADOR CENTRAL                               │
+│ • Recibe consultas                                          │
+│ • Determina el mejor asistente                              │
+│ • Combina múltiples respuestas                              │
+│ • Maneja contexto de conversación                           │
 └──────────────────────────────┬──────────────────────────────┘
-                                │
+                               │
     ┌───────────┬──────────────┼───────────────┬───────────┐
     │           │              │               │           │
 ┌───▼───┐ ┌─────▼────┐ ┌──────▼──────┐ ┌──────▼──────┐ ┌──▼─────┐
-│Wrapper│ │  Wrapper  │ │   Wrapper   │ │   Wrapper   │ │Wrapper │
-│ OpenAI│ │Dialogflow │ │   Custom    │ │  Wolfram    │ │  ...   │
+│Wrapper│ │ Wrapper  │ │  Wrapper    │ │  Wrapper    │ │Wrapper │
+│ OpenAI│ │Dialogflow│ │  Custom     │ │  Wolfram    │ │  ...  │
 └───┬───┘ └─────┬────┘ └──────┬──────┘ └──────┬──────┘ └──┬─────┘
     │           │              │               │           │
 ┌───▼───┐ ┌─────▼────┐ ┌──────▼──────┐ ┌──────▼──────┐ ┌──▼─────┐
-│Asist. │ │ Asistente │ │  Asistente  │ │  Asistente  │ │Asist.  │
-│OpenAI │ │Dialogflow │ │   Local     │ │   Alpha     │ │  ...   │
-└───────┘ └───────────┘ └─────────────┘ └─────────────┘ └────────┘
+│Asist. │ │ Asistente│ │  Asistente  │ │  Asistente  │ │Asist.  │
+│OpenAI │ │Dialogflow│ │   Local     │ │   Alpha     │ │  ...  │
+└───────┘ └──────────┘ └─────────────┘ └─────────────┘ └────────┘
 2. Diagramas del Sistema
 Diagrama de Secuencia - Flujo Normal
 Diagrama de Componentes
@@ -104,8 +105,9 @@ Límite de 60 peticiones por minuto
 Solo texto (no imágenes)
 
 5. Protocolo de Comunicación Estandarizado
-Formato de Entrada
-json
+### 5.1 Formato de Entrada
+
+```json
 {
   "query": "texto de la consulta",
   "context": {
@@ -123,8 +125,9 @@ json
     "response_format": "text"
   }
 }
-Formato de Salida
-json
+### 5.2 Formato de Salida
+
+```json
 {
   "success": true,
   "assistant": "nombre_del_asistente",
