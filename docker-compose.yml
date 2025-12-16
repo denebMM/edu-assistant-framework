@@ -10,7 +10,7 @@ volumes:
   redis-data:
 
 services:
-  # Base de datos (sin cambios)
+  # Base de datos
   db:
     image: postgres:14
     restart: always
@@ -25,13 +25,8 @@ services:
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     networks:
       - av_framework_net
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d edu_db"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
-  # Redis (sin cambios)
+  # Redis
   redis:
     image: redis:7-alpine
     container_name: edu-redis
@@ -43,16 +38,11 @@ services:
     networks:
       - av_framework_net
     command: redis-server --appendonly yes --save 60 1 --loglevel notice
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
-  # Ollama (sin cambios)
-  ollama:
+  # Ollama SERVER
+  ollama-server:
     image: ollama/ollama:latest
-    container_name: ollama
+    container_name: ollama-server
     restart: unless-stopped
     ports:
       - "11434:11434"
@@ -66,18 +56,16 @@ services:
       - |
         echo "Iniciando Ollama server..."
         ollama serve &
-        sleep 10
-        if [ ! -f /root/.ollama/models/manifests/registry.ollama.ai/library/tinyllama/latest ]; then
-          echo "Descargando tinyllama..."
-          ollama pull tinyllama
-        fi
-        echo "Ollama listo"
+        sleep 15
+        echo "Descargando tinyllama..."
+        ollama pull tinyllama || echo "Ya está descargado o error"
+        echo "Ollama server listo en puerto 11434"
         wait
 
-  # Rule-based - CON CONTEXTO RAÍZ
+  # Rule-based
   rule_based:
     build:
-      context: .  # ¡CONTEXTO RAÍZ!
+      context: .
       dockerfile: assistants/rule-based/Dockerfile
     container_name: rule-based
     restart: always
@@ -85,20 +73,17 @@ services:
       - "5001:5001"
     environment:
       REDIS_URL: redis://redis:6379
-      DB_HOST: db
-      DB_USER: user
-      DB_PASSWORD: password
-      DB_NAME: edu_db
+      PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: "INFO"
     networks:
       - av_framework_net
     depends_on:
-      - db
       - redis
 
-  # DeepPavlov - CON CONTEXTO RAÍZ
+  # DeepPavlov
   deeppavlov_nlu:
     build:
-      context: .  # ¡CONTEXTO RAÍZ!
+      context: .
       dockerfile: assistants/deeppavlov-nlu/Dockerfile
     container_name: deeppavlov-nlu
     restart: always
@@ -106,16 +91,40 @@ services:
       - "5002:5002"
     environment:
       REDIS_URL: redis://redis:6379
+      PYTHONUNBUFFERED: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      TRANSFORMERS_OFFLINE: "0"
+      LOG_LEVEL: "INFO"
     networks:
       - av_framework_net
     depends_on:
-      - db
       - redis
 
-  # Orchestrator - CON CONTEXTO RAÍZ
+  # Ollama ASSISTANT
+  ollama-assistant:
+    build:
+      context: .
+      dockerfile: assistants/ollama/Dockerfile
+    container_name: ollama-assistant
+    restart: always
+    ports:
+      - "5003:5003"
+    environment:
+      OLLAMA_HOST: http://ollama-server:11434
+      OLLAMA_MODEL: tinyllama
+      REDIS_URL: redis://redis:6379
+      PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: "INFO"
+    networks:
+      - av_framework_net
+    depends_on:
+      - ollama-server
+      - redis
+
+  # Orchestrator
   orchestrator:
     build:
-      context: .  # ¡CONTEXTO RAÍZ!
+      context: .
       dockerfile: orchestrator/Dockerfile
     container_name: orchestrator
     restart: always
@@ -128,21 +137,24 @@ services:
       DB_NAME: edu_db
       RULE_BASED_URL: http://rule_based:5001
       DEEPPAVLOV_URL: http://deeppavlov_nlu:5002
-      OLLAMA_URL: http://ollama:11434
+      OLLAMA_WRAPPER_URL: http://ollama-assistant:5003
       REDIS_URL: redis://redis:6379
+      PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: "DEBUG"
+      ORCHESTRATOR_TIMEOUT: "8"
     networks:
       - av_framework_net
     depends_on:
       - db
       - redis
-      - ollama
       - rule_based
       - deeppavlov_nlu
+      - ollama-assistant
 
-  # UI - CON CONTEXTO RAÍZ
+  # UI
   ui:
     build:
-      context: .  # ¡CONTEXTO RAÍZ!
+      context: .
       dockerfile: ui/Dockerfile
     container_name: ui
     restart: always
@@ -150,6 +162,7 @@ services:
       - "8501:8501"
     environment:
       ORCHESTRATOR_URL: http://orchestrator:8000
+      PYTHONUNBUFFERED: "1"
     networks:
       - av_framework_net
     depends_on:

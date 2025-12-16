@@ -1,176 +1,171 @@
-# wrapper.py: Adaptador para el AV basado en reglas con Redis Bus
+# wrapper.py: Rule-based Assistant Wrapper - Versión FINAL corregida e integrada
 import threading
-import json
 import time
 import sys
 import os
+from typing import Dict, Any
 
-# Agregar ruta para importar common
+# Agregar ruta para common
 sys.path.append('/app')
 
-# Intentar importar Redis Bus
+# Redis Bus
 try:
     from common.redis_bus import bus
     REDIS_AVAILABLE = True
     print("✅ RedisBus disponible para rule_based")
 except Exception as e:
     REDIS_AVAILABLE = False
-    print(f"⚠️  RedisBus no disponible: {e}")
+    print(f"⚠️ RedisBus no disponible: {e}")
 
-from fastapi import FastAPI, Request  # Framework para API REST
-app = FastAPI()  # Inicializa la app
+from fastapi import FastAPI, Request
+import uvicorn
 
-from Code import chatbot  
+# Importar el chatbot original
+from Code import chatbot
+
+app = FastAPI(title="Rule-based Assistant")
+
+# Frases comunes que indican que el rule-based no entendió o no tiene respuesta específica
+UNKNOWN_PHRASES = [
+    "no entiendo", "no sé", "no se", "lo siento", "disculpa",
+    "no comprendo", "no tengo", "no puedo", "¿puedes repetir",
+    "no match", "default", "unknown", "desconocido"
+]
+
+def es_respuesta_valida(response_text: str) -> bool:
+    """Determina si la respuesta del rule-based es útil o solo un fallback genérico"""
+    if not response_text:
+        return False
+    text_lower = response_text.strip().lower()
+    if len(text_lower) < 10:  # Muy corta
+        return False
+    if any(phrase in text_lower for phrase in UNKNOWN_PHRASES):
+        return False
+    return True
 
 @app.get("/")
 async def root():
-    return {"message": "Rule-based AV funcionando", "status": "ok"}
+    return {"message": "Rule-based Assistant corriendo", "status": "ok"}
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "rule_based_av"}
-
-@app.get("/bus-status")
-async def bus_status():
-    """Endpoint para verificar estado del bus"""
-    return {
-        "redis_available": REDIS_AVAILABLE,
-        "listeners": ["rule_based_requests", "assistants.all"] if REDIS_AVAILABLE else [],
-        "status": "connected" if REDIS_AVAILABLE else "disconnected"
-    }
+    return {"status": "healthy", "service": "rule_based"}
 
 @app.post("/query")
 async def handle_query(request: Request):
-    """
-    Maneja una query educativa:
-    - Recibe JSON: {"query": "string", "context": {"topic": "string"}} (estandarizado)
-    - Llama al AV original (regla-based).
-    - Devuelve JSON: {"task": "string", "output_data": {"response": "string", "status": "string", "metadata": "object"}}
-    - Para hacerlo educativo: Agrega reglas en chatbot.py, e.g., if "suma" in user_input: return "Explicación de suma...".
-      Por ahora, usa las reglas originales.
-    """
-    data = await request.json()  # Parsea input JSON
-    query = data.get("query")  # Query principal
-    context = data.get("context", {})  # Contexto opcional (e.g., tema educativo)
-    
-    if not query:
-        return {"error": "No se proporcionó una query válida."}
-    
-    # Llama al AV original (regla-based)
-    response_text = chatbot(query)  # Llama a la función chatbot del archivo original
-    
-    # Si Redis está disponible, emitir evento de actividad
-    if REDIS_AVAILABLE:
-        try:
-            bus.publish(
-                channel='assistant_activity',
-                message_type='http_query_processed',
-                data={
-                    'assistant': 'rule_based',
-                    'query': query[:100],  # Solo primeros 100 caracteres
-                    'response_length': len(response_text),
-                    'timestamp': time.time()
-                },
-                source='rule_based'
+    """Endpoint HTTP - ahora con success flag para orquestador"""
+    try:
+        data = await request.json()
+        query = data.get("query", "").strip()
+
+        if not query:
+            return {"response": "No recibí ninguna pregunta.", "success": False}
+
+        print(f"🔍 [HTTP] Rule-based procesando: '{query}'")
+
+        response_text = chatbot(query).strip()
+
+        if es_respuesta_valida(response_text):
+            success = True
+            final_response = response_text
+        else:
+            final_response = (
+                "Lo siento, no tengo una respuesta específica para eso con mis reglas básicas. "
+                "¡Prueba con un saludo, un chiste o una operación matemática simple!"
             )
-        except Exception as e:
-            print(f"⚠️  No se pudo emitir evento al bus: {e}")
-    
-    # Estandariza la salida JSON (universal para todos los AVs)
-    return {
-        "task": "explain_basic",  # Tipo de tarea (expande: "quiz", "adapt", etc.)
-        "output_data": {
-            "response": response_text,  # Respuesta del AV
-            "status": "success",  # Estado
-            "metadata": {"topic": context.get("topic", "general")}  # Metadata educativa
+            success = False
+            print("⚠️ Rule-based no reconoció la consulta → marcando como error")
+
+        return {
+            "response": final_response,
+            "success": success,
+            "source": "rule_based",
+            "original_length": len(response_text)
         }
-    }
 
+    except Exception as e:
+        print(f"❌ Error crítico en handle_query HTTP: {e}")
+        return {
+            "response": "Error interno en el asistente basado en reglas.",
+            "success": False,
+            "error": str(e)
+        }
+
+# === Redis Bus Integration ===
+# En el wrapper de rule-based, AÑADIR esto en la función start_bus_listener:
+# En la función start_bus_listener del rule-based, REEMPLAZAR con:
 def start_bus_listener():
-    """Inicia el listener del bus para rule_based"""
     if not REDIS_AVAILABLE:
-        print("⚠️  No se iniciará listener Redis (no disponible)")
+        print("⚠️ Redis no disponible → solo HTTP")
         return
-    
-    def handle_query_request(message):
-        """Maneja mensajes de tipo 'query_request' del bus"""
-        try:
-            print(f"📨 rule_based recibió mensaje del bus: {message.get('type')}")
-            
-            if message.get('type') != 'query_request':
-                return
-            
-            data = message.get('data', {})
-            query_id = data.get('query_id')
-            query = data.get('query')
-            reply_to = data.get('reply_to')
-            
-            if not query or not query_id or not reply_to:
-                print("⚠️  Mensaje incompleto, ignorando")
-                return
-            
-            print(f"🔍 Procesando consulta via bus: {query[:50]}...")
-            
-            # Procesar la consulta con el chatbot existente
-            response_text = chatbot(query)
-            
-            # Preparar respuesta en formato estandarizado
-            response_data = {
-                "task": "explain_basic",
-                "output_data": {
-                    "response": response_text,
-                    "status": "success",
-                    "metadata": {"topic": "general", "source": "rule_based"}
-                }
-            }
-            
-            # Publicar la respuesta en el canal de respuestas
-            bus.publish(
-                channel=reply_to,
-                message_type='query_response',
-                data={
-                    'query_id': query_id,
-                    'assistant': 'rule_based',
-                    'response': response_data,
-                    'status': 'success'
-                },
-                source='rule_based'
-            )
-            
-            print(f"✅ rule_based respondió via bus, ID: {query_id[:8]}")
-            
-        except Exception as e:
-            print(f"❌ Error en handle_query_request: {e}")
-            if REDIS_AVAILABLE and 'reply_to' in locals() and reply_to:
-                bus.publish(
-                    channel=reply_to,
-                    message_type='query_response',
-                    data={
-                        'query_id': query_id,
-                        'assistant': 'rule_based',
-                        'response': f"Error: {str(e)}",
-                        'status': 'error'
-                    },
-                    source='rule_based'
-                )
-    
-    # Suscribirse al canal de solicitudes para rule_based
-    bus.subscribe('rule_based_requests', handle_query_request)
-    
-    # También suscribirse a canal general para pruebas
-    bus.subscribe('assistants.all', handle_query_request)
-    
-    # Iniciar el bus
-    bus.start()
-    print("✅ rule_based assistant escuchando en el bus de mensajes")
 
-# Iniciar el listener en un hilo separado al arrancar
+    def handle_query_request(message):
+        try:
+            print(f"📨 [BUS] Rule-based recibió mensaje RAW: {message}")
+            
+            # El mensaje de Redis llega como diccionario
+            if message.get('type') == 'message':
+                # Parsear el JSON que viene en 'data'
+                import json
+                payload = json.loads(message['data'])
+                
+                if payload.get('type') == 'query_request':
+                    data = payload.get('data', {})
+                    query_id = data.get('query_id')
+                    query = data.get('query', '').strip()
+                    reply_to = data.get('reply_to')
+                    
+                    if not all([query_id, query, reply_to]):
+                        print("⚠️ Mensaje incompleto vía bus")
+                        return
+                    
+                    print(f"✅ [BUS] Rule-based procesando: '{query}'")
+                    
+                    # Procesar con el chatbot
+                    raw_response = chatbot(query).strip()
+                    
+                    # Determinar si es respuesta válida
+                    if es_respuesta_valida(raw_response):
+                        response_text = raw_response
+                        status = "success"
+                        print(f"✅ Rule-based sabe responder: {response_text[:50]}")
+                    else:
+                        response_text = "No tengo una respuesta específica para eso."
+                        status = "error"
+                        print(f"⚠️ Rule-based no sabe → status=error")
+                    
+                    # Publicar respuesta
+                    bus.publish(
+                        channel=reply_to,
+                        message_type='query_response',
+                        data={
+                            'query_id': query_id,
+                            'assistant': 'rule_based',
+                            'response': response_text,
+                            'status': status
+                        },
+                        source='rule_based'
+                    )
+                    print(f"📤 [BUS] Rule-based respondió a {reply_to}")
+                    
+        except Exception as e:
+            print(f"❌ Error en handler Redis: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # Suscribirse CORRECTAMENTE
+    bus.subscribe('rule_based_requests', handle_query_request)
+    bus.subscribe('assistants.all', handle_query_request)  # Para debugging
+    
+    # IMPORTANTE: Iniciar el bus (esto estaba faltando)
+    bus.start()
+    print("✅ Rule-based ESCUCHANDO en Redis Bus")
+    
+# Iniciar listener en background
 if REDIS_AVAILABLE:
     threading.Thread(target=start_bus_listener, daemon=True).start()
 else:
-    print("⚠️  Iniciando rule_based sin Redis Bus")
+    print("⚠️ Iniciando rule-based solo con HTTP")
 
-# Este es para mantener compatibilidad con Uvicorn
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=5001)
