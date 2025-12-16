@@ -7,5 +7,7 @@ transformers==4.20.1
 Cython>=0.29.36
 pydantic<2.0.0
 tqdm<4.65.0,>=4.42.0
+redis>=5.0.0
+
 
 

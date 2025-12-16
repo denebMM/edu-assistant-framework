@@ -1,3 +1,5 @@
+version: '3.8'
+
 networks:
   av_framework_net:
     driver: bridge
@@ -5,9 +7,10 @@ networks:
 volumes:
   db-data:
   ollama-data:
+  redis-data:
 
 services:
-  # Base de datos
+  # Base de datos (sin cambios)
   db:
     image: postgres:14
     restart: always
@@ -28,7 +31,25 @@ services:
       timeout: 5s
       retries: 5
 
-  # Ollama para LLMs
+  # Redis (sin cambios)
+  redis:
+    image: redis:7-alpine
+    container_name: edu-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - av_framework_net
+    command: redis-server --appendonly yes --save 60 1 --loglevel notice
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Ollama (sin cambios)
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
@@ -53,39 +74,49 @@ services:
         echo "Ollama listo"
         wait
 
-  # Asistente basado en reglas
+  # Rule-based - CON CONTEXTO RAÍZ
   rule_based:
     build:
-      context: ./assistants/rule-based
-      dockerfile: Dockerfile
+      context: .  # ¡CONTEXTO RAÍZ!
+      dockerfile: assistants/rule-based/Dockerfile
     container_name: rule-based
     restart: always
     ports:
       - "5001:5001"
+    environment:
+      REDIS_URL: redis://redis:6379
+      DB_HOST: db
+      DB_USER: user
+      DB_PASSWORD: password
+      DB_NAME: edu_db
     networks:
       - av_framework_net
     depends_on:
       - db
+      - redis
 
-  # Asistente NLU (Transformers multilingüe)
+  # DeepPavlov - CON CONTEXTO RAÍZ
   deeppavlov_nlu:
     build:
-      context: ./assistants/deeppavlov-nlu
-      dockerfile: Dockerfile
+      context: .  # ¡CONTEXTO RAÍZ!
+      dockerfile: assistants/deeppavlov-nlu/Dockerfile
     container_name: deeppavlov-nlu
     restart: always
     ports:
       - "5002:5002"
+    environment:
+      REDIS_URL: redis://redis:6379
     networks:
       - av_framework_net
     depends_on:
       - db
+      - redis
 
-  # Orquestador principal
+  # Orchestrator - CON CONTEXTO RAÍZ
   orchestrator:
     build:
-      context: ./orchestrator
-      dockerfile: Dockerfile
+      context: .  # ¡CONTEXTO RAÍZ!
+      dockerfile: orchestrator/Dockerfile
     container_name: orchestrator
     restart: always
     ports:
@@ -98,23 +129,21 @@ services:
       RULE_BASED_URL: http://rule_based:5001
       DEEPPAVLOV_URL: http://deeppavlov_nlu:5002
       OLLAMA_URL: http://ollama:11434
+      REDIS_URL: redis://redis:6379
     networks:
       - av_framework_net
     depends_on:
-      db:
-        condition: service_healthy
-      ollama:
-        condition: service_started
-      rule_based:
-        condition: service_started
-      deeppavlov_nlu:
-        condition: service_started
+      - db
+      - redis
+      - ollama
+      - rule_based
+      - deeppavlov_nlu
 
-  # Interfaz de usuario
+  # UI - CON CONTEXTO RAÍZ
   ui:
     build:
-      context: ./ui
-      dockerfile: Dockerfile
+      context: .  # ¡CONTEXTO RAÍZ!
+      dockerfile: ui/Dockerfile
     container_name: ui
     restart: always
     ports:

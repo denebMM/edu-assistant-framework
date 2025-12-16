@@ -1,16 +1,29 @@
-# orchestrator/main.py - Versión final completa y corregida
+# orchestrator/main.py - Versión con Redis Bus
 import time
+import uuid
+import json
 import requests
 import ollama
 import unicodedata
 import logging
 import threading
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 from db_utils import get_or_create_user, log_metric
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Importar Redis Bus
+try:
+    import sys
+    sys.path.append('/app')
+    from common.redis_bus import bus
+    REDIS_AVAILABLE = True
+    logger.info("✅ RedisBus disponible en orquestador")
+except Exception as e:
+    REDIS_AVAILABLE = False
+    logger.warning(f"⚠️  RedisBus no disponible: {e}")
 
 class Orchestrator:
     def __init__(self):
@@ -19,8 +32,54 @@ class Orchestrator:
             "deeppavlov": "http://deeppavlov-nlu:5002",
         }
         # Modelo de Ollama - usa 'phi' o 'tinyllama' según lo que tengas disponible
-        self.llm_model = "phi"  # Cambia a "tinyllama" si phi no funciona
+        self.llm_model = "tinyllama" 
+        
+        # Variables para comunicación por bus
+        self.pending_responses = {}
+        self.response_events = {}
+        
+        # Iniciar listener de bus si está disponible
+        if REDIS_AVAILABLE:
+            self._setup_bus_listeners()
+            bus.start()
+            logger.info("✅ Orquestador configurado con bus de mensajes")
+        else:
+            logger.info("⚠️  Orquestador usando comunicación HTTP tradicional")
+        
         logger.info(f"✅ Orquestador inicializado con modelo Ollama: {self.llm_model}")
+
+    def _setup_bus_listeners(self):
+        """Configura los listeners del bus"""
+        def handle_assistant_response(message):
+            """Maneja respuestas de asistentes por bus"""
+            try:
+                data = message.get('data', {})
+                query_id = data.get('query_id')
+                assistant = data.get('assistant')
+                response = data.get('response')
+                status = data.get('status', 'unknown')
+                
+                if query_id and query_id in self.response_events:
+                    logger.info(f"📥 Respuesta recibida via bus de {assistant} para query {query_id[:8]}")
+                    
+                    # Guardar respuesta
+                    self.pending_responses[query_id] = {
+                        'assistant': assistant,
+                        'response': response,
+                        'status': status,
+                        'received_at': time.time()
+                    }
+                    
+                    # Notificar que llegó la respuesta
+                    event = self.response_events.get(query_id)
+                    if event:
+                        event.set()
+                        
+            except Exception as e:
+                logger.error(f"❌ Error manejando respuesta del bus: {e}")
+        
+        # Suscribirse a canal general de respuestas
+        bus.subscribe('assistant_responses', handle_assistant_response)
 
     @staticmethod
     def normalize_text(text: str) -> str:
@@ -50,9 +109,38 @@ class Orchestrator:
             return {"assistant": "ollama", "confidence": 0.5}  # Ollama es el más versátil
 
     def call_assistant(self, assistant: str, query: str) -> Tuple[str, float, float]:
-        """Llama al asistente con manejo de errores y fallback"""
+        """Llama al asistente - intenta bus primero, fallback a HTTP"""
         start = time.time()
         
+        # Para rule_based y deeppavlov, intentar primero por bus
+        if REDIS_AVAILABLE and assistant in ['rule_based', 'deeppavlov']:
+            try:
+                logger.info(f"🔄 Intentando llamar a {assistant} via bus...")
+                result = self.call_assistant_via_bus(assistant, query)
+                if result["success"]:
+                    latency = time.time() - start
+                    logger.info(f"✅ {assistant} respondió via bus en {latency:.2f}s")
+                    
+                    # Emitir evento de actividad
+                    bus.publish(
+                        channel='assistant_activity',
+                        message_type='assistant_used_via_bus',
+                        data={
+                            'assistant': assistant,
+                            'latency': latency,
+                            'query_length': len(query)
+                        },
+                        source='orchestrator'
+                    )
+                    
+                    return result["response"], latency, 0.0
+                else:
+                    logger.warning(f"⚠️  Bus falló para {assistant}: {result.get('error')}, intentando HTTP...")
+            except Exception as e:
+                logger.warning(f"⚠️  Error en bus para {assistant}: {e}, usando HTTP")
+        
+        # Fallback a HTTP tradicional
+        logger.info(f"🔄 Llamando a {assistant} via HTTP...")
         try:
             if assistant == "rule_based":
                 result = self.call_rule_based(query)
@@ -70,6 +158,82 @@ class Orchestrator:
         response = result.get("response", f"Error: {result.get('error', 'Desconocido')}")
         
         return response, latency, error_rate
+
+    def call_assistant_via_bus(self, assistant: str, query: str, timeout: int = 10) -> Dict:
+        """Llama a un asistente usando el bus Redis"""
+        if not REDIS_AVAILABLE:
+            return {"success": False, "error": "Redis no disponible"}
+        
+        query_id = str(uuid.uuid4())
+        reply_channel = f"reply_{query_id}"
+        
+        # Crear evento para esperar respuesta
+        response_event = threading.Event()
+        self.response_events[query_id] = response_event
+        self.pending_responses[query_id] = None
+        
+        # Suscribirse temporalmente al canal de respuesta
+        def temp_handler(message):
+            data = message.get('data', {})
+            if data.get('query_id') == query_id:
+                self.pending_responses[query_id] = {
+                    'assistant': data.get('assistant'),
+                    'response': data.get('response'),
+                    'status': data.get('status', 'unknown')
+                }
+                response_event.set()
+        
+        bus.subscribe(reply_channel, temp_handler)
+        
+        # Publicar solicitud
+        message_id = bus.publish(
+            channel=f'{assistant}_requests',
+            message_type='query_request',
+            data={
+                'query_id': query_id,
+                'query': query,
+                'reply_to': reply_channel,
+                'timestamp': time.time()
+            },
+            source='orchestrator'
+        )
+        
+        if not message_id:
+            logger.error(f"❌ No se pudo publicar mensaje en el bus para {assistant}")
+            return {"success": False, "error": "Error publicando en el bus"}
+        
+        logger.info(f"📤 Enviado via bus a {assistant}, ID: {query_id[:8]}")
+        
+        # Esperar respuesta con timeout
+        response_received = response_event.wait(timeout=timeout)
+        
+        # Limpiar
+        del self.response_events[query_id]
+        
+        if not response_received:
+            logger.warning(f"⏰ Timeout esperando respuesta de {assistant} via bus")
+            return {"success": False, "error": "Timeout esperando respuesta"}
+        
+        # Obtener resultado
+        result = self.pending_responses.pop(query_id, None)
+        
+        if result and result.get('status') == 'success':
+            # Extraer respuesta según el formato del asistente
+            response_data = result.get('response')
+            if isinstance(response_data, dict):
+                if 'response' in response_data:
+                    output = response_data['response']
+                elif 'output_data' in response_data and 'response' in response_data['output_data']:
+                    output = response_data['output_data']['response']
+                else:
+                    output = str(response_data)
+            else:
+                output = str(response_data)
+            
+            return {"success": True, "response": output}
+        else:
+            error_msg = result.get('response', 'Error desconocido') if result else 'Sin respuesta'
+            return {"success": False, "error": error_msg}
 
     def call_rule_based(self, query: str) -> Dict:
         """Llamar rule-based con manejo de formatos"""

@@ -2,10 +2,12 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+# Copiar requirements específico del servicio
+COPY ui/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py .
+# Copiar código del servicio
+COPY ui/ .
 
 EXPOSE 8501
 
